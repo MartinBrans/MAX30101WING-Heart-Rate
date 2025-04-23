@@ -77,7 +77,7 @@ void op_sensor_callback()
 {
     op_sensorIntFlag = 1;
 }
-
+ 
 //declare large variables outside of main
 uint32_t redData[500];//set array to max fifo size
 uint32_t irData[500];//set array to max fifo size
