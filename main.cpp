@@ -1,0 +1,850 @@
+/*******************************************************************************
+ * Copyright (C) 2017 Maxim Integrated Products, Inc., All Rights Reserved.
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included
+ * in all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+ * OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ * IN NO EVENT SHALL MAXIM INTEGRATED BE LIABLE FOR ANY CLAIM, DAMAGES
+ * OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
+ * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+ * OTHER DEALINGS IN THE SOFTWARE.
+ *
+ * Except as contained in this notice, the name of Maxim Integrated
+ * Products, Inc. shall not be used except as stated in the Maxim Integrated
+ * Products, Inc. Branding Policy.
+ *
+ * The mere transfer of this software does not imply any licenses
+ * of trade secrets, proprietary technology, copyrights, patents,
+ * trademarks, maskwork rights, or any other form of intellectual
+ * property whatsoever. Maxim Integrated Products, Inc. retains all
+ * ownership rights.
+ *******************************************************************************
+ */
+
+
+#include "mbed.h"
+#include "max32630fthr.h"
+#include "MAX30101.h"
+#include "USBSerial.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <math.h>
+#include <string.h>
+
+//variable for the algorithm
+uint16_t sampleRate =100;
+uint16_t compSpO2=1;
+int16_t ir_ac_comp =0;
+int16_t red_ac_comp=0;
+int16_t green_ac_comp=0;
+int16_t ir_ac_mag=0;
+int16_t red_ac_mag=0;
+int16_t green_ac_mag=0;
+uint16_t HRbpm2=0;
+uint16_t SpO2B=0;
+uint16_t DRdy=0;
+
+//Heart rate and SpO2 algorithm
+void HRSpO2Func(uint32_t dinIR, uint32_t dinRed, uint32_t dinGreen, uint32_t ns,uint16_t SampRate,uint16_t compSpO2,
+                int16_t *ir_ac_comp,int16_t *red_ac_comp, int16_t *green_ac_comp, int16_t *ir_ac_mag,int16_t *red_ac_mag, int16_t *green_ac_mag,    uint16_t *HRbpm2,uint16_t *SpO2B,uint16_t *DRdy  );
+
+//helper functions for the heart rate and SpO2 function
+uint16_t avg_dc_est(int32_t *p, uint16_t x);
+
+void lp_dfir_flt(int16_t din0,int16_t din1,int16_t din2, int16_t *dout0,int16_t *dout1,int16_t *dout2) ;
+int32_t mul16(int16_t x, int16_t y);
+
+//set logic level to 3.3V
+MAX32630FTHR pegasus(MAX32630FTHR::VIO_3V3);
+
+//IC configuration functions
+bool op_sensor_config(MAX30101 &op_sensor);
+void pmic_config(I2C & i2c_bus, DigitalOut & pmic_en);
+
+/* Op Sensor FIFO nearly full callback */
+volatile bool op_sensorIntFlag = 0;
+void op_sensor_callback()
+{
+    op_sensorIntFlag = 1;
+}
+
+//declare large variables outside of main
+uint32_t redData[500];//set array to max fifo size
+uint32_t irData[500];//set array to max fifo size
+uint32_t greenData[500];//set array to max fifo size
+
+USBSerial pc1; // Direct connection to PC via USB, not MAXDAP 
+
+int main()
+{
+    Serial pc(USBTX, USBRX);            // Use USB debug probe for serial link
+    pc.baud(115200);                    // Baud rate = 115200
+
+    DigitalOut rLed(LED1, LED_OFF);     // Debug LED
+
+    InterruptIn op_sensor_int(P3_2);            // Config P3_2 as int. in for
+    op_sensor_int.fall(&op_sensor_callback);    // FIFO ready interrupt
+
+    I2C i2cBus(I2C1_SDA, I2C1_SCL);         // I2C bus, P3_4 = SDA, P3_5 = SCL
+
+    DigitalOut VLED_EN(P3_3,0);                //Enable for VLEDs
+    pmic_config(i2cBus, VLED_EN);
+
+    MAX30101 op_sensor(i2cBus);             // Create new MAX30101 on i2cBus
+    int rc = op_sensor_config(op_sensor);   // Config sensor, return 0 on success
+
+    MAX30101::InterruptBitField_u ints;         // Read interrupt status to clear
+    rc = op_sensor.getInterruptStatus(ints);    // power on interrupt
+
+    uint8_t fifoData[MAX30101::MAX_FIFO_BYTES];
+    uint16_t idx, readBytes;
+    int32_t opSample;
+    uint32_t sample;
+    uint16_t HRTemp;
+    uint16_t spo2Temp;
+
+    int r=0; //counter for redData position
+    int ir=0; //counter for irData position
+    int g =0; //counter for greenData position
+    int c=0; //counter to print values
+
+    wait(2.0);
+
+    pc.printf("Starting Program...Please wait a few seconds while data is being collected.\r\n");
+    pc1.printf("Starting Program...Please wait a few seconds while data is being collected.\r\n");
+    while(1) {
+        if( rc == 0 ) {
+
+            // Check if op_sensor interrupt asserted
+            if(op_sensorIntFlag) {
+                //pc.printf("Entered op_sensorIntFlag check\r\n");
+                //pc1.printf("Entered op_sensorIntFlag check\r\n");
+                op_sensorIntFlag = 0;                       // Lower interrupt flag
+                rc = op_sensor.getInterruptStatus(ints);    // Read interrupt status
+                //to clear interrupt
+
+                // Confirms proper read prior to executing
+                if(rc == 0) {
+                    // Read FIFO
+                    rc = op_sensor.readFIFO(MAX30101::ThreeLedChannels, fifoData, readBytes);
+
+                    if(rc == 0) {
+
+                        // Convert read bytes into samples
+                        pc1.printf("Number of bytes : %i\r\n", readBytes);
+                        for (idx = 0; idx < readBytes; idx+=9) {
+                                         if (r >= 500 || ir >= 500 || g >= 500) {
+                                                pc.printf("Overflow!");
+                                                pc1.printf("Overflow!\n");
+                                         }
+                                         redData[r++] = ((fifoData[idx] << 16) | (fifoData[idx + 1] << 8) | (fifoData[idx + 2])) & 0x03FFFF;
+
+                                         irData[ir++] = ((fifoData[idx + 3] << 16) | (fifoData[idx + 4] << 8) | (fifoData[idx + 5])) & 0x03FFFF;
+
+                                         greenData[g++] = ((fifoData[idx + 6] << 16) | (fifoData[idx + 7] << 8) | (fifoData[idx + 8])) & 0x03FFFF;
+                                  }
+
+
+
+                        if(r>=500 && ir>=500 && g>500)//checks to make sure there are 500
+                            //samples in data buffers
+                        {
+
+                            //runs the heart rate and SpO2 algorithm
+                            for(c=0, HRTemp = 0; c<r; c++) {
+
+                                HRSpO2Func(irData[c], redData[c],greenData[c], c,sampleRate, compSpO2,
+                                           &ir_ac_comp,&red_ac_comp, &green_ac_comp, &ir_ac_mag,&red_ac_mag,
+                                           &green_ac_mag, &HRbpm2,&SpO2B,&DRdy);
+                                if(DRdy)
+                                {
+                                    HRTemp = HRbpm2;
+                                    spo2Temp = SpO2B;    
+                                }
+
+                            }
+
+                            //If the above algorithm returns a valid heart rate on the last sample, it is printed
+                            if(DRdy==1) {
+                                pc.printf("Heart Rate = %i\n\r",HRbpm2);
+                                pc.printf("SPO2 = %i\n\r",SpO2B);
+                                pc1.printf("Heart Rate = %i\n\r",HRbpm2);
+                                pc1.printf("SPO2 = %i\n\r",SpO2B);
+                            }
+                            else if (HRTemp!=0)//if a valid heart was calculated at all, it is printed
+                            {
+                                pc.printf("Heart Rate = %i\n\r",HRTemp);
+                                pc.printf("SPO2 = %i\n\r",spo2Temp);
+                                pc1.printf("Heart Rate = %i\n\r",HRTemp);
+                                pc1.printf("SPO2 = %i\n\r",spo2Temp);
+                            }
+                            else
+                            {
+                                pc.printf("Calculation failed...waiting for more samples...\r\n");
+                                pc.printf("Please keep your finger on the MAX30101 sensor with minimal movement.\r\n"); 
+                                pc1.printf("Calculation failed...waiting for more samples...\n\r");
+                                pc1.printf("Please keep your finger on the MAX30101 sensor with minimal movement.\n\r"); 
+                            }
+
+                            //dump the first hundred samples after caluclaiton
+                            for(c=100; c<500; c++)
+
+                            {
+                                redData[c-100]=redData[c];
+                                irData[c-100]=irData[c];
+                                greenData[c-100] = greenData[c];
+
+                            }
+                            //reset counters
+                            r=400;
+                            ir=400;
+                            g=400;
+                        }
+                    }
+                }
+            }
+
+            // If rc != 0, a communication error has occurred
+        } else {
+
+            pc.printf("Something went wrong, "
+                      "check the I2C bus or power connections... \r\n");
+            pc1.printf("Something went wrong, "
+                      "check the I2C bus or power connections... \r\n");
+            //bLed = LED_OFF;
+            //gLed = LED_OFF;
+
+            while(1) {
+                pc1.printf("Something went wrong, "
+                      "check the I2C bus or power connections... \r\n");
+                rLed = !rLed;
+                wait(1.0);
+            }
+        }
+
+    }
+}
+
+
+bool op_sensor_config(MAX30101 &op_sensor)
+{
+
+    //Reset Device
+    MAX30101::ModeConfiguration_u modeConfig;
+    modeConfig.all = 0;
+    modeConfig.bits.reset = 1;
+    modeConfig.bits.mode = MAX30101::MultiLedMode;     // Sets SPO2 Mode
+    int32_t rc = op_sensor.setModeConfiguration(modeConfig);
+
+
+    //enable MAX30101 interrupts
+    MAX30101::InterruptBitField_u ints;
+    if(rc == 0) {
+        ints.all = 0;
+        ints.bits.a_full = 1;       // Enable FIFO almost full interrupt
+        ints.bits.ppg_rdy =1;       //Enables an interrupt when a new sample is ready
+        rc = op_sensor.enableInterrupts(ints);
+    }
+
+    //configure FIFO
+    MAX30101::FIFO_Configuration_u fifoConfig;
+    if(rc == 0) {
+        fifoConfig.all = 0;
+        fifoConfig.bits.fifo_a_full = 10;                            // Max level of 17 samples
+        fifoConfig.bits.sample_average = MAX30101::AveragedSamples_0;// Average 0 samples
+        rc = op_sensor.setFIFOConfiguration(fifoConfig);
+    }
+
+    MAX30101::SpO2Configuration_u spo2Config;
+    if(rc == 0) {
+        spo2Config.all = 0;                                 // clears register
+        spo2Config.bits.spo2_adc_range = 1;                 //sets resolution to 4096 nAfs
+        spo2Config.bits.spo2_sr = MAX30101::SR_100_Hz;     // SpO2 SR = 100Hz
+        spo2Config.bits.led_pw = MAX30101::PW_3;            // 18-bit ADC resolution ~400us
+        rc = op_sensor.setSpO2Configuration(spo2Config);
+    }
+
+    //Set time slots for LEDS
+    MAX30101::ModeControlReg_u multiLED;
+    if(rc==0) {
+        //sets timing for control register 1
+        multiLED.bits.lo_slot=1;
+        multiLED.bits.hi_slot=2;
+        rc = op_sensor.setMultiLEDModeControl(MAX30101::ModeControlReg1, multiLED);
+        if(rc==0) {
+            multiLED.bits.lo_slot=3;
+            multiLED.bits.hi_slot=0;
+            rc = op_sensor.setMultiLEDModeControl(MAX30101::ModeControlReg2, multiLED);
+        }
+    }
+
+    //Set LED drive currents
+    if(rc == 0) {
+        // Heart Rate only, 1 LED channel, Pulse amp. = ~7mA
+        rc = op_sensor.setLEDPulseAmplitude(MAX30101::LED1_PA, 0x24);
+        //To include SPO2, 2 LED channel, Pulse amp. ~7mA
+        if(rc==0) {
+            rc = op_sensor.setLEDPulseAmplitude(MAX30101::LED2_PA, 0x24);
+        }
+        if(rc==0) {
+            rc = op_sensor.setLEDPulseAmplitude(MAX30101::LED3_PA, 0x24);
+        }
+
+    }
+
+    //Set operating mode
+    modeConfig.all = 0;
+    if(rc == 0) {
+        modeConfig.bits.mode = MAX30101::MultiLedMode;     // Sets multiLED mode
+        rc = op_sensor.setModeConfiguration(modeConfig);
+    }
+
+
+    return rc;
+}
+
+void pmic_config(I2C & i2c_bus, DigitalOut & pmic_en)
+{
+
+    const uint8_t PMIC_ADRS = 0x54;
+    const uint8_t BBB_EXTRA_ADRS = 0x1C;
+    const uint8_t BOOST_VOLTAGE = 0x05;
+
+    char data_buff[] = {BBB_EXTRA_ADRS, 0x40};    //BBBExtra register address
+    //and data to enable passive
+    //pull down.
+    i2c_bus.write(PMIC_ADRS, data_buff,2);        //write to BBBExtra register
+
+    data_buff[0] = BOOST_VOLTAGE;
+    data_buff[1] = 0x08;                          //Boost voltage configuration
+    //register followed by data
+    //to set voltage to 4.5V 1f
+    pmic_en = 0;                                  //disables VLED 08
+    i2c_bus.write(PMIC_ADRS, data_buff,2);        //write to BBBExtra register
+    pmic_en = 1;                                  //enables VLED
+}
+
+
+
+//
+//  Heart Rate/SpO2 Monitor function takes sample input 'dinIR' and dinRed.
+//  Other inputs:
+//      ns -> Sample Counter, increments with each sample input.
+//      SampRate -> Input data real-time sample rate.
+//      dinLShft -> Number of left shifts for data to be 16 bit wide.
+//      compSpO2 -> If '1' compute SpO2 value,else compute HR only.
+
+//
+//  Outputs:
+//      ir_ac_comp  -> AC component of the IR signal.
+//      red_ac_comp -> AC component of the Red signal.
+//      ir_ac_mag   -> Peak to Peak magnitude of the IR signal.
+//      red_ac_mag  -> Peak to Peak magnitude of the Red signal.
+//      HRbpm       -> Heart Rate in beats per minute.
+//      SpO2        -> SpO2 value as %saturation.
+//      DRdy        -> '1' when new data is available.
+//
+
+void HRSpO2Func(uint32_t dinIR, uint32_t dinRed, uint32_t dinGreen, uint32_t ns,uint16_t SampRate,uint16_t compSpO2,
+                int16_t *ir_ac_comp,int16_t *red_ac_comp, int16_t *green_ac_comp, int16_t *ir_ac_mag,int16_t *red_ac_mag, 
+                int16_t *green_ac_mag,    uint16_t *HRbpm2,uint16_t *SpO2B,uint16_t *DRdy  )
+{
+    static int32_t ir_avg_reg=0;
+    static int32_t red_avg_reg=0;
+    static int32_t green_avg_reg=0;
+
+    static int16_t ir_ac_sig_cur=0;
+    static int16_t ir_ac_sig_pre;
+    static int16_t ir_ac_sig_min=0;
+    static int16_t ir_ac_sig_max=0;
+    static int16_t ir_avg_est;
+
+    static int16_t ir_pedge=0, ir_nedge=0;
+    static int16_t ir_pzxic, ir_pzxip;
+    static int16_t ir_nzxic;
+
+    static int16_t red_ac_sig_cur=0;
+    static int16_t red_ac_sig_min=0;
+    static int16_t red_ac_sig_max=0;
+    static int16_t red_avg_est;
+
+    static int16_t green_avg_est;
+    static int16_t green_ac_sig_cur=0;
+    //static int16_t green_ac_sig_cur=0;
+    static int16_t green_ac_sig_pre;
+    static int16_t green_ac_sig_max ;
+    static int16_t  green_ac_sig_min;
+    static int16_t green_mac_FIFO[5];
+    int16_t meanGreenMagFIFO;
+    int16_t minAmpForHeartBeat ;
+
+    uint32_t  IRData,RedData, greenData , rnum,rden,rdens;
+    uint16_t  zeros_in_HrQue =0 ,   posCount=0;
+    static uint32_t prevPeakLoc = 0  ;
+    static int16_t IrFIFO[100];
+    static int16_t HrQue[10], lastKnownGoodHr[10];
+    static int16_t SPO2Que[5];
+    int16_t SPO2score[5];
+    static uint16_t HrQindex=0 ,lengthOfposCountExceeding =0 ;
+    static uint16_t initHrQueCounter=0 , fingerOff =0;
+
+    static int16_t HrQueSmoothing[3];
+    static int16_t SPO2QueSmoothing[3];
+
+    int16_t  k, j;
+    uint32_t peakLoc ;
+    int16_t bufferIdx1,  bufferIdx2;
+    int16_t maxFIFO ,IdxMaxFIFO ;
+    int16_t HRperiod2, HRComp2 ,deltaHR;
+    int16_t cSpO2, SpO2;
+
+    int16_t HrCount =0, HrSum =0 ,meanGreenMagFIFOcounter =0;
+    int16_t SPO2D ,meanHrQ;
+    int16_t dx[99] ,cumsumX[99];
+    static int16_t SPO2QueCounter =0 ;//, lastDisplayedHrValue;
+
+    int16_t validSPO2Count =0;
+    int16_t validSPO2Sum =0;
+    int16_t SPO2scoreAverage=  0;
+    int16_t SPO2scoreSum =0 ;
+//  int16_t  deltaMeanLastKnownGoodHr=0,meanLastKnownGoodHr =0 ;
+//  int16_t     counterMeanLastKnownGoodHr =0 ;
+
+
+//  clear some vars if fresh new start
+    if ((ns ==0) || (fingerOff  >300)) {
+        ir_avg_reg=0;
+        red_avg_reg=0;
+        green_avg_reg=0;
+
+        ir_ac_sig_cur=0;
+        ir_ac_sig_pre=0;
+        ir_ac_sig_min=0;
+        ir_ac_sig_max=0;
+
+        ir_avg_est=0;
+        green_avg_est =0;
+        red_avg_est =0 ;
+
+        ir_pedge=0;
+        ir_nedge=0;
+        ir_pzxic=0;
+        ir_pzxip =0;
+        ir_nzxic=0 ;
+        //ir_nzxip =0;
+        red_ac_sig_cur=0;
+        red_ac_sig_min=0;
+        red_ac_sig_max=0;
+
+        prevPeakLoc = 0 ;
+        bufferIdx1=0 ;
+        bufferIdx2=0;
+        HrQindex =0;
+        initHrQueCounter=0;
+        lengthOfposCountExceeding =0 ;
+        fingerOff =0;
+        HRComp2 =0;
+
+        for (k=0 ; k<100 ; k++) {
+            IrFIFO[k]= 0;
+        }
+        for (k=0 ; k<10 ; k++) {
+            HrQue[k]= 0;
+            lastKnownGoodHr[k]=0;
+        }
+        for (k=0 ; k<3 ; k++) {
+            HrQueSmoothing[k]= 70;
+            SPO2QueSmoothing[k]=97;
+        }
+        for (k=0 ; k<5 ; k++) {
+            SPO2Que[k] =97;
+            SPO2score[k] =0;
+            green_mac_FIFO[k] =0;
+        }
+        SPO2QueCounter =0;
+        *SpO2B =97;
+        *HRbpm2 = 0;
+        *DRdy =0 ;
+
+    }
+
+
+//  Save current state
+    green_ac_sig_pre = green_ac_sig_cur;
+//
+//  Process next data sample
+    minAmpForHeartBeat =0;
+    IRData  = dinIR;
+    RedData = dinRed;
+    greenData = dinGreen ;
+
+    ir_avg_est  = avg_dc_est(&ir_avg_reg,IRData);
+    red_avg_est = avg_dc_est(&red_avg_reg,RedData);
+    green_avg_est = avg_dc_est(&green_avg_reg,greenData);
+
+    lp_dfir_flt((uint16_t)(IRData - ir_avg_est),(uint16_t)(RedData - red_avg_est), 
+                (uint16_t)(greenData - green_avg_est),  &ir_ac_sig_cur,&red_ac_sig_cur,&green_ac_sig_cur);
+
+
+    *ir_ac_comp   = ir_ac_sig_cur;
+    *red_ac_comp  = red_ac_sig_cur;
+    *green_ac_comp  = green_ac_sig_cur;
+
+    //save to FIFO
+    for (k=1 ; k<100 ; k++) {
+        IrFIFO[100 -k]= IrFIFO[99-k];
+    }
+    IrFIFO[0] =  green_ac_sig_cur ; // invert
+    for (k=0 ; k<97 ; k++)
+        dx[k]= IrFIFO[k+2]-IrFIFO[k] ;
+    dx[97]= dx[96];
+    dx[98]=dx[96];
+
+    for (k=0 ; k<99 ; k++) {
+        if (dx[k] > 0 )
+            dx[k]=1;
+        else
+            dx[k] = 0;
+    }
+
+    cumsumX[0] =0;
+    for (k=1; k<99 ; k++) {
+        if (dx[k]>0 )
+            cumsumX[k]=  cumsumX[k-1] + dx[k] ;
+        else
+            cumsumX[k]=  0;
+    }
+// determine noise
+    // ignore less than 3 conseuctive non-zeros's
+    // detect # of sign change
+    posCount=0;
+    for (k=1; k<99 ; k++) {
+        if (cumsumX[k]>0 ) {
+            posCount ++ ;
+        } else if (cumsumX[k]==0 ) {
+            if (posCount<4  && k>=4) {
+                for ( j= k-1; j> k-posCount-1; j--)
+                    cumsumX[j]=0 ;
+            }
+            posCount =0;
+        }
+    }
+    // ignore less than 3 conseuctive zeros's
+
+    posCount=0;
+    for (k=1; k<99 ; k++) {
+        if (cumsumX[k]==0 ) {
+            posCount ++ ;
+        } else if (cumsumX[k] > 0 ) {
+            if (posCount<4  && k>=4) {
+                for ( j= k-1; j> k-posCount-1; j--)
+                    cumsumX[j]=100 ;
+            }
+            posCount =0;
+        }
+    }
+
+//// detect # of sign change
+    posCount=0; // sign change counter
+    for (k=0; k<98 ; k++) {
+        if (cumsumX[k]==0  && cumsumX[k+1] > 0 ) {
+            posCount ++;
+        }
+    }
+    if (posCount>=4) {
+        lengthOfposCountExceeding ++ ;
+        // printf("PosCount =%i \n", posCount );
+    } else
+        lengthOfposCountExceeding = 0 ;
+//  Detect IR channel positive zero crossing (rising edge)
+    if ((green_ac_sig_pre < 0) && (green_ac_sig_cur >= 0) && fingerOff==0 ) {
+
+        *ir_ac_mag   = ir_ac_sig_max   - ir_ac_sig_min;
+        *red_ac_mag  = red_ac_sig_max  - red_ac_sig_min;
+        *green_ac_mag  = green_ac_sig_max  - green_ac_sig_min;
+        if ( *green_ac_mag>0 ) {
+            for (k=0; k<4 ; k++)
+                green_mac_FIFO[k]=green_mac_FIFO[k+1];
+            green_mac_FIFO[4] = *green_ac_mag ;
+            if (  green_mac_FIFO[4] > 1000)
+                green_mac_FIFO[4] =1000;
+        }
+        meanGreenMagFIFO=0;
+        meanGreenMagFIFOcounter=0;
+        for (k=0; k<5 ; k++) {
+            if( green_mac_FIFO[k] >0) {
+                meanGreenMagFIFO= meanGreenMagFIFO +green_mac_FIFO[k] ;
+                meanGreenMagFIFOcounter++;
+            }
+        }
+        if (meanGreenMagFIFOcounter>=2 ) {
+            meanGreenMagFIFO =meanGreenMagFIFO/ meanGreenMagFIFOcounter ;
+            minAmpForHeartBeat= meanGreenMagFIFO /4 ;  //25% of mean of past heart beat
+        } else
+            minAmpForHeartBeat = 75;
+        if (minAmpForHeartBeat <75)
+            minAmpForHeartBeat =75;
+        if (minAmpForHeartBeat >400)
+            minAmpForHeartBeat =400;
+
+        ir_pedge = 1;
+        ir_nedge = 0;
+        ir_ac_sig_max = 0;
+        ir_pzxip = ir_pzxic;
+        ir_pzxic = ns;
+        bufferIdx1= ir_pzxic- ir_nzxic;
+        bufferIdx2 = ir_pzxic -ir_pzxip;
+
+
+        if ((*green_ac_mag)> minAmpForHeartBeat && (*green_ac_mag)< 20000  && bufferIdx1>=0 
+            && bufferIdx1 <100  && bufferIdx2>=0 && bufferIdx2 <100 && bufferIdx1< bufferIdx2 ) { // was <5000
+            maxFIFO = -32766;
+
+            IdxMaxFIFO = 0;
+            for ( j=bufferIdx1; j<= bufferIdx2; j++) { // find max peak
+                if (IrFIFO[j] > maxFIFO ) {
+                    maxFIFO =IrFIFO[j];
+                    IdxMaxFIFO  =j;
+                }
+            }
+            peakLoc= ir_pzxic -IdxMaxFIFO+1 ;
+
+            if (prevPeakLoc !=0) {
+                HRperiod2 =( uint16_t) (peakLoc -  prevPeakLoc);
+                if (HRperiod2>33 && HRperiod2 < 134) {
+                    HRComp2= (6000/HRperiod2);
+                    fingerOff =0 ;
+                } else
+                    HRComp2=0 ;
+            } else
+                HRComp2 = 0 ;
+
+            if ( initHrQueCounter<10  && HRComp2 >0 ) {
+                HrQue[HrQindex] =HRComp2;
+                HrQindex++;
+                initHrQueCounter ++;
+                if (HrQindex== 10)
+                    HrQindex  =0;
+            }
+
+            if (initHrQueCounter > 7  && lengthOfposCountExceeding<=3) {
+                if ( HRComp2 > 0) {
+
+                    HrCount =0;
+                    HrSum =0;
+                    zeros_in_HrQue=0;
+                    for (k=1 ; k<initHrQueCounter ; k++) {
+                        if (HrQue[k] >0) {
+                            HrSum +=HrQue[k];
+                            HrCount ++;
+                        } else
+                            zeros_in_HrQue ++;
+                    }
+                    meanHrQ = HrSum/HrCount ;
+                    deltaHR= lastKnownGoodHr[0]/10;
+
+                    if ( HRComp2 >  lastKnownGoodHr[0] -deltaHR &&  HRComp2  <lastKnownGoodHr[0] +deltaHR    ) {
+                        for (k=1 ; k<10 ; k++) {
+                            HrQue[10 -k]= HrQue[9-k];
+                        }
+                        HrQue[0] =HRComp2;
+                    }              // HR smmothing using FIFO queue -
+
+                    if (zeros_in_HrQue<=2) {
+                        for (k=1 ; k<3 ; k++) {
+                            HrQueSmoothing[3 -k]= HrQueSmoothing[2-k];
+                        }
+                        HrQueSmoothing[0] = meanHrQ ;
+                        HRComp2 =  ( (HrQueSmoothing[0]<<2) + (HrQueSmoothing[1]<<1) + (HrQueSmoothing[2] <<1) ) >>3;
+                        *HRbpm2 =HRComp2 ;
+
+                        for (k=1 ; k<10 ; k++) {
+                            lastKnownGoodHr[10 -k]= lastKnownGoodHr[9-k];
+                        }
+                        lastKnownGoodHr[0] =HRComp2;
+                    }
+                }
+
+            }
+            ///// if (initHrQueCounter > 7  && lengthOfposCountExceeding<5)
+            else if (initHrQueCounter < 7) { // before que is filled up, display whatever it got.
+                *HRbpm2 =  HRComp2;
+
+            } else {
+                //  *HRbpm2 =  0 ;
+                HrCount =0;
+                HrSum =0;
+                for (k=0 ; k<10 ; k++) {
+                    if (lastKnownGoodHr[k] >0) {
+                        HrSum =HrSum + lastKnownGoodHr[k];
+                        HrCount++;
+                    }
+                }
+                if (HrCount>0)
+                    *HRbpm2 =   HrSum/HrCount;
+                else
+                    *HRbpm2 = 0;
+
+
+
+            }
+            prevPeakLoc = peakLoc ; // save peakLoc into Static var
+
+
+            if (compSpO2) {
+                rnum = (ir_avg_reg >> 20)*(*red_ac_mag);
+                rden = (red_avg_reg >> 20)*(*ir_ac_mag);
+                rdens = (rden>>15);
+                if (rdens>0) cSpO2 = 110- (((25*rnum)/(rdens))>>15);
+
+                if (cSpO2 >=100) SpO2 = 100;
+                else if (cSpO2 <= 70) SpO2 = 70;
+                else SpO2 = cSpO2;
+
+                SPO2Que[SPO2QueCounter ] = SpO2;
+
+                for (k=0 ; k<5 ; k++) {
+                    SPO2score[k]  =0;
+                    for (j=0 ; j< 5 ; j++)
+                        if( abs( SPO2Que[k] - SPO2Que[j] )>5)
+                            SPO2score[k] ++;
+                }
+
+
+                SPO2scoreSum=  0;
+                for (k=0 ; k<5 ; k++)
+                    SPO2scoreSum += SPO2score[k] ;
+                SPO2scoreAverage= SPO2scoreSum / 5;
+                for (k=1 ; k<5 ; k++)
+                    SPO2score[k] = SPO2score[k] -SPO2scoreAverage;
+
+                validSPO2Count =0;
+                validSPO2Sum =0;
+                for (k=1 ; k<5 ; k++) {
+                    if (SPO2score[k]<=0 ) { // add for HR to report
+                        validSPO2Sum +=SPO2Que[k];
+                        validSPO2Count ++;
+                    }
+                }
+                if ( validSPO2Count>0)
+                    SPO2D = (validSPO2Sum /validSPO2Count)-1;
+                if ( SPO2D >100)
+                    SPO2D = 100;
+
+                SPO2QueCounter ++;
+                if (SPO2QueCounter ==5) SPO2QueCounter = 0;
+
+                for (k=1 ; k<3 ; k++) {
+                    SPO2QueSmoothing[3 -k]= SPO2QueSmoothing[2-k];
+                }
+                SPO2QueSmoothing[0] = SPO2D;
+                *SpO2B =  ( (SPO2QueSmoothing[0]<<2) + (SPO2QueSmoothing[1]<<1) + (SPO2QueSmoothing[2] <<1) ) >>3;
+
+                if (*SpO2B> 100) *SpO2B = 100 ;
+
+            } else {
+                SpO2 = 0;
+                *SpO2B = 0;
+            }
+            *DRdy = 1;
+
+        }
+    }
+//  Detect IR channel negative zero crossing (falling edge)
+    if ((green_ac_sig_pre > 0) && (green_ac_sig_cur <= 0)) {
+        ir_pedge = 0;
+        ir_nedge = 1;
+        ir_ac_sig_min = 0;
+        ir_nzxic = ns;
+    }
+//  Find Maximum IR & Red values in positive cycle
+    if (ir_pedge && (green_ac_sig_cur > green_ac_sig_pre)) {
+        ir_ac_sig_max  = ir_ac_sig_cur;
+        red_ac_sig_max = red_ac_sig_cur;
+        green_ac_sig_max = green_ac_sig_cur;
+    }
+
+//  Find minimum IR & Red values in negative cycle
+    if (ir_nedge && (green_ac_sig_cur < green_ac_sig_pre)) {
+        ir_ac_sig_min  = ir_ac_sig_cur;
+        red_ac_sig_min = red_ac_sig_cur;
+        green_ac_sig_min = green_ac_sig_cur;
+    }
+    if (IRData <50000  )
+        // finger-off
+    {
+        fingerOff++;
+        *DRdy = 0;
+    } else
+        fingerOff = 0 ;
+    /*if  (IRData <50000  &&  fingerOff>10 )
+       fingerOff = 0; */
+    if  ( *SpO2B ==  0  ||   *HRbpm2 ==0)
+        *DRdy = 0;
+
+    /*if (ns > 2000 )
+    {
+        if (abs(lastDisplayedHrValue - *HRbpm2)>5)
+            *HRbpm2 =lastDisplayedHrValue ;
+        else
+            lastDisplayedHrValue = *HRbpm2;
+    }*/
+    // *DRdy = minAmpForHeartBeat;
+
+}
+
+//  Average DC Estimator
+uint16_t avg_dc_est(int32_t *p, uint16_t x)
+{
+    *p += ((((int32_t) x << 15) - *p)>>4);
+    return (*p >> 15);
+}
+
+//  Symmetric Dual Low Pass FIR Filter
+void lp_dfir_flt(int16_t din0,int16_t din1,int16_t din2, int16_t *dout0,int16_t *dout1,int16_t *dout2)
+{
+    static const uint16_t FIRCoeffs[12] = {688,1283,2316,3709,5439,7431,
+                                           9561,11666,13563,15074,16047,16384
+                                          };
+
+    static int16_t cbuf0[32],cbuf1[32] , cbuf2[32];
+    static int16_t offset = 0;
+    int32_t y0,y1, y2;
+    int16_t i;
+
+    cbuf0[offset] = din0;
+    cbuf1[offset] = din1;
+    cbuf2[offset] = din2;
+
+    y0 = mul16(FIRCoeffs[11], cbuf0[(offset - 11)&0x1F]);
+    y1 = mul16(FIRCoeffs[11], cbuf1[(offset - 11)&0x1F]);
+    y2 = mul16(FIRCoeffs[11], cbuf2[(offset - 11)&0x1F]);
+
+
+    for (i=0; i<11; i++) {
+        y0 += mul16(FIRCoeffs[i], cbuf0[(offset-i)&0x1F] + cbuf0[(offset-22+i)&0x1F]);
+        y1 += mul16(FIRCoeffs[i], cbuf1[(offset-i)&0x1F] + cbuf1[(offset-22+i)&0x1F]);
+        y2 += mul16(FIRCoeffs[i], cbuf2[(offset-i)&0x1F] + cbuf2[(offset-22+i)&0x1F]);
+    }
+    offset = (offset + 1)&0x1F;
+
+    *dout0 = (y0>>15);
+    *dout1 =  (y1>>15);
+    *dout2 =  (y2>>15);
+}
+
+//  Integer multiplier
+int32_t mul16(int16_t x, int16_t y)
+{
+    return (int32_t)(x* y);
+}
