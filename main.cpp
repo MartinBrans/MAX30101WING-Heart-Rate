@@ -77,7 +77,7 @@ void op_sensor_callback()
 {
     op_sensorIntFlag = 1;
 }
- 
+
 //declare large variables outside of main
 uint32_t redData[500];//set array to max fifo size
 uint32_t irData[500];//set array to max fifo size
@@ -141,11 +141,11 @@ int main()
                     if(rc == 0) {
 
                         // Convert read bytes into samples
-                        pc1.printf("Number of bytes : %i\r\n", readBytes);
                         for (idx = 0; idx < readBytes; idx+=9) {
                                          if (r >= 500 || ir >= 500 || g >= 500) {
                                                 pc.printf("Overflow!");
                                                 pc1.printf("Overflow!\n");
+                                                break;
                                          }
                                          redData[r++] = ((fifoData[idx] << 16) | (fifoData[idx + 1] << 8) | (fifoData[idx + 2])) & 0x03FFFF;
 
@@ -156,7 +156,7 @@ int main()
 
 
 
-                        if(r>=500 && ir>=500 && g>500)//checks to make sure there are 500
+                        if(r>=500 && ir>=500 && g>=500)//checks to make sure there are 500
                             //samples in data buffers
                         {
 
