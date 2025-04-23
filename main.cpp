@@ -79,16 +79,17 @@ void op_sensor_callback()
 }
 
 //declare large variables outside of main
-uint32_t redData[500];//set array to max fifo size
-uint32_t irData[500];//set array to max fifo size
-uint32_t greenData[500];//set array to max fifo size
+uint32_t redData[520];//set array to max fifo size
+uint32_t irData[520];//set array to max fifo size
+uint32_t greenData[520];//set array to max fifo size
 
 USBSerial pc1; // Direct connection to PC via USB, not MAXDAP 
 
 int main()
 {
-    Serial pc(USBTX, USBRX);            // Use USB debug probe for serial link
-    pc.baud(115200);                    // Baud rate = 115200
+    wait(2.0);
+    // Serial pc(USBTX, USBRX);            // Use USB debug probe for serial link
+    // pc.baud(115200);                    // Baud rate = 115200
 
     DigitalOut rLed(LED1, LED_OFF);     // Debug LED
 
@@ -118,9 +119,8 @@ int main()
     int g =0; //counter for greenData position
     int c=0; //counter to print values
 
-    wait(2.0);
 
-    pc.printf("Starting Program...Please wait a few seconds while data is being collected.\r\n");
+    // pc.printf("Starting Program...Please wait a few seconds while data is being collected.\r\n");
     pc1.printf("Starting Program...Please wait a few seconds while data is being collected.\r\n");
     while(1) {
         if( rc == 0 ) {
@@ -142,16 +142,16 @@ int main()
 
                         // Convert read bytes into samples
                         for (idx = 0; idx < readBytes; idx+=9) {
-                                         if (r >= 500 || ir >= 500 || g >= 500) {
-                                                pc.printf("Overflow!");
-                                                pc1.printf("Overflow!\n");
-                                                break;
-                                         }
+                                        //  if (r >= 500 || ir >= 500 || g >= 500) {
+                                                // pc.printf("Overflow!");
+                                                // pc1.printf("Overflow!\n\r");
+                                        //  }
                                          redData[r++] = ((fifoData[idx] << 16) | (fifoData[idx + 1] << 8) | (fifoData[idx + 2])) & 0x03FFFF;
 
                                          irData[ir++] = ((fifoData[idx + 3] << 16) | (fifoData[idx + 4] << 8) | (fifoData[idx + 5])) & 0x03FFFF;
 
                                          greenData[g++] = ((fifoData[idx + 6] << 16) | (fifoData[idx + 7] << 8) | (fifoData[idx + 8])) & 0x03FFFF;
+                                        // pc.printf("%i,%i,%i\r\n",redData[r-1],irData[ir-1],greenData[g-1]);
                                   }
 
 
@@ -176,28 +176,28 @@ int main()
 
                             //If the above algorithm returns a valid heart rate on the last sample, it is printed
                             if(DRdy==1) {
-                                pc.printf("Heart Rate = %i\n\r",HRbpm2);
-                                pc.printf("SPO2 = %i\n\r",SpO2B);
+                                // pc.printf("Heart Rate = %i\n\r",HRbpm2);
+                                // pc.printf("SPO2 = %i\n\r",SpO2B);
                                 pc1.printf("Heart Rate = %i\n\r",HRbpm2);
                                 pc1.printf("SPO2 = %i\n\r",SpO2B);
                             }
                             else if (HRTemp!=0)//if a valid heart was calculated at all, it is printed
                             {
-                                pc.printf("Heart Rate = %i\n\r",HRTemp);
-                                pc.printf("SPO2 = %i\n\r",spo2Temp);
+                                // pc.printf("Heart Rate = %i\n\r",HRTemp);
+                                // pc.printf("SPO2 = %i\n\r",spo2Temp);
                                 pc1.printf("Heart Rate = %i\n\r",HRTemp);
                                 pc1.printf("SPO2 = %i\n\r",spo2Temp);
                             }
                             else
                             {
-                                pc.printf("Calculation failed...waiting for more samples...\r\n");
-                                pc.printf("Please keep your finger on the MAX30101 sensor with minimal movement.\r\n"); 
+                                // pc.printf("Calculation failed...waiting for more samples...\r\n");
+                                // pc.printf("Please keep your finger on the MAX30101 sensor with minimal movement.\r\n"); 
                                 pc1.printf("Calculation failed...waiting for more samples...\n\r");
                                 pc1.printf("Please keep your finger on the MAX30101 sensor with minimal movement.\n\r"); 
                             }
 
                             //dump the first hundred samples after caluclaiton
-                            for(c=100; c<500; c++)
+                            for(c=100; c<520; c++)
 
                             {
                                 redData[c-100]=redData[c];
@@ -206,9 +206,9 @@ int main()
 
                             }
                             //reset counters
-                            r=400;
-                            ir=400;
-                            g=400;
+                            r-=100;
+                            ir-=100;
+                            g-=100;
                         }
                     }
                 }
@@ -217,8 +217,8 @@ int main()
             // If rc != 0, a communication error has occurred
         } else {
 
-            pc.printf("Something went wrong, "
-                      "check the I2C bus or power connections... \r\n");
+            // pc.printf("Something went wrong, "
+                    //   "check the I2C bus or power connections... \r\n");
             pc1.printf("Something went wrong, "
                       "check the I2C bus or power connections... \r\n");
             //bLed = LED_OFF;
@@ -291,13 +291,13 @@ bool op_sensor_config(MAX30101 &op_sensor)
     //Set LED drive currents
     if(rc == 0) {
         // Heart Rate only, 1 LED channel, Pulse amp. = ~7mA
-        rc = op_sensor.setLEDPulseAmplitude(MAX30101::LED1_PA, 0x24);
+        rc = op_sensor.setLEDPulseAmplitude(MAX30101::LED1_PA, 0x34);
         //To include SPO2, 2 LED channel, Pulse amp. ~7mA
         if(rc==0) {
-            rc = op_sensor.setLEDPulseAmplitude(MAX30101::LED2_PA, 0x24);
+            rc = op_sensor.setLEDPulseAmplitude(MAX30101::LED2_PA, 0x34);
         }
         if(rc==0) {
-            rc = op_sensor.setLEDPulseAmplitude(MAX30101::LED3_PA, 0x24);
+            rc = op_sensor.setLEDPulseAmplitude(MAX30101::LED3_PA, 0xFF);
         }
 
     }
