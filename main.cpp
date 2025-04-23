@@ -40,6 +40,9 @@
 #include <stdlib.h>
 #include <math.h>
 #include <string.h>
+#define MY_BUF_SIZE (1024)
+#define MY_WIN_SIZE (1000)
+#define MY_DEL_SIZE (200)
 
 //variable for the algorithm
 uint16_t sampleRate =100;
@@ -79,9 +82,9 @@ void op_sensor_callback()
 }
 
 //declare large variables outside of main
-uint32_t redData[520];//set array to max fifo size
-uint32_t irData[520];//set array to max fifo size
-uint32_t greenData[520];//set array to max fifo size
+uint32_t redData[MY_BUF_SIZE];//set array to max fifo size
+uint32_t irData[MY_BUF_SIZE];//set array to max fifo size
+uint32_t greenData[MY_BUF_SIZE];//set array to max fifo size
 
 USBSerial pc1; // Direct connection to PC via USB, not MAXDAP 
 
@@ -156,7 +159,7 @@ int main()
 
 
 
-                        if(r>=500 && ir>=500 && g>=500)//checks to make sure there are 500
+                        if(r>=MY_WIN_SIZE && ir>=MY_WIN_SIZE && g>=MY_WIN_SIZE)//checks to make sure there are 500
                             //samples in data buffers
                         {
 
@@ -197,18 +200,18 @@ int main()
                             }
 
                             //dump the first hundred samples after caluclaiton
-                            for(c=100; c<520; c++)
+                            for(c=MY_DEL_SIZE; c<MY_BUF_SIZE; c++)
 
                             {
-                                redData[c-100]=redData[c];
-                                irData[c-100]=irData[c];
-                                greenData[c-100] = greenData[c];
+                                redData[c-MY_DEL_SIZE]=redData[c];
+                                irData[c-MY_DEL_SIZE]=irData[c];
+                                greenData[c-MY_DEL_SIZE] = greenData[c];
 
                             }
                             //reset counters
-                            r-=100;
-                            ir-=100;
-                            g-=100;
+                            r-=MY_DEL_SIZE;
+                            ir-=MY_DEL_SIZE;
+                            g-=MY_DEL_SIZE;
                         }
                     }
                 }
