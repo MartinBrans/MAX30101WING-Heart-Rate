@@ -31,6 +31,15 @@
  *******************************************************************************
  */
 
+/*
+ TODO : 
+ - test with a second green pulse
+ - increase ADC gain and reduce red & ir current
+ - stream data via BLE
+ - test other algos
+ - maybe try to remove red & ir altogether (requires to rework the algo)
+ - LED4_PA (green LED current boost) -> register 0x0F
+*/
 
 #include "mbed.h"
 #include "max32630fthr.h"
