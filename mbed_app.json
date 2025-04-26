@@ -1,7 +1,0 @@
-{
-    "target_overrides": {
-        "*": {
-            "target.device_has_add": ["USBDEVICE"]
-        }
-    }
-}

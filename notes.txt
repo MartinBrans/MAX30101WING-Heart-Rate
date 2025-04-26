@@ -1,0 +1,62 @@
+--- Sources & applied fixes ---
+
+Setting the CORRECT firmware on MAXDAP/MAX32625PICO (programmer) chip 
+ (not MAXREFDES100HDK like written on the website...) : 
+    https://github.com/analogdevicesinc/max32625pico-firmware-images
+
+Heart rate algo source code for MAX30101WING :
+    https://os.mbed.com/teams/Maxim-Integrated/code/MAX30101WING_HR_SPO2/
+    https://os.mbed.com/teams/MaximIntegrated/code/max32630fthr/
+    https://os.mbed.com/teams/MaximIntegrated/code/MAX30101/
+    MAX30101.lib and max32630fthr.lib don't actually work on keil studio cloud bc... github reasons
+     its supposed to be able to automatically clone them but it doesn't
+     so instead you can download the zips, extract them and upload them to get it to work
+
+
+BLE usage source code : 
+    For correct usage : https://github.com/gbetsis/mbed-bluetooth-batterylevel/tree/master
+    For data receiver side (and some other stuff) : https://os.mbed.com/teams/mbed-os-examples/code/mbed-os-example-ble-HeartRate/
+    Mbed OS 5.9.7 -> allows for BLE & Comms via micro usb (not just via DAPLINK)
+        https://forums.mbed.com/t/max32630-usbmsd-driver-not-found/12621/3 -> Mbed OS 5.10 or higher doesnt allow micro usb
+        Mbed OS 6.x allows for micro usb (kinda, you have to use USBDevice.lib and delete all except USBDevice and USBSerial),
+         but not BLE (see in mbed-os/features, the FEATURE_BLE folder has to be there)
+        Change OS version via Mbed Libraries tab in the console on keil studio cloud
+    forums : https://forums.mbed.com/t/max32630fthr-and-ble/9748/10
+    more forums : https://forums.mbed.com/t/max32630fthr-ble-error/16235/13
+    more forums : https://os.mbed.com/questions/78005/Using-MAX32630FTHR-PAN1326B-bluetooth-mo/
+    A library that offers support, but not related to Mbed OS ? https://github.com/bluekitchen/btstack
+
+
+Micro-usb :
+    Base code : https://os.mbed.com/users/switches/code/FTHR_USB_serial/
+    Sometimes, USBDevice.lib is necessary, sometimes not, depends on Mbed OS version I think
+    USBDecive.lib seems to be unecessary for later versions of Mbed OS 5 (eg 5.15),
+     but necessary again for 6.x because Maxim didn't update everything
+    https://forums.mbed.com/t/this-board-does-not-have-a-hardware-usb-driver-but-it-does/7473/3
+    For 6.x, you have to delete most of the folder of the library, otherwise it doesn't compile
+     You have to keep only USBDevice and USBSerial
+    If you're having trouble, mbed_app.json can help (it didnt for me, but you can try, see forum)
+    
+
+Note for others : 
+    Buy another MCU board if you can, the MAX32630FTHR sucks
+     because Maxim are not keeping anything up to date, all their codes are valid for Mbed OS ~5.9
+     and Mbed OS is gonna disappear in july 2026 anyway
+     https://os.mbed.com/blog/entry/Important-Update-on-Mbed/
+    Also, the MAX30101WING we received looked nothing like the pictures and we had to do a bit of hardware changes
+     (they put female connectors on the sensor side, so it was impossible to make a bracelet out of it
+     we had to remove them and put other ones on the back side, ie pointing away from the sensor)
+    Its possible to program the FTHR with Arduino OS instead of Mbed OS, which might be easier for you but
+    - no guarantee it works, you might run into trouble if Maxim forgot to update stuff again
+    - the example codes (and this one) would have to be reworked bc these OSes dont work the same way
+    - link to do that : https://github.com/analogdevicesinc/arduino-max326xx
+
+
+
+TODO : 
+- test with a second green pulse (slot 4)
+- increase ADC gain and reduce red & ir current
+- test other algos
+- maybe try to remove red & ir altogether (requires to rework the algo)
+- LED4_PA (green LED current boost up to 80mA) -> register 0x0F
+- stream data via BLE (kinda done)
