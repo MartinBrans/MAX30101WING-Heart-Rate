@@ -11,20 +11,26 @@ Heart rate algo source code for MAX30101WING :
     MAX30101.lib and max32630fthr.lib don't actually work on keil studio cloud bc... github reasons
      its supposed to be able to automatically clone them but it doesn't
      so instead you can download the zips, extract them and upload them to get it to work
+    The algorithm as uploaded on the site doesn't work, which is mind bending, it's like no one has ever tested it.
+     You have to prevent a segfault from happening when the data buffers are overflowing (see "Overflow!" debug print),
+     because they just keep writing even though they know they overflowed the buffers.
+     If you don't, then the program will always crash because the buffers don't empty until they are full.
+     ... Again I don't understand how this garbage was uploaded as an example code for the MAX30101
 
 
 BLE usage source code : 
     For correct usage : https://github.com/gbetsis/mbed-bluetooth-batterylevel/tree/master
     For data receiver side (and some other stuff) : https://os.mbed.com/teams/mbed-os-examples/code/mbed-os-example-ble-HeartRate/
-    Mbed OS 5.9.7 -> allows for BLE & Comms via micro usb (not just via DAPLINK)
+    Use Mbed OS 5.9.7 -> allows for BLE & Comms via micro usb (not just via DAPLINK)
         https://forums.mbed.com/t/max32630-usbmsd-driver-not-found/12621/3 -> Mbed OS 5.10 or higher doesnt allow micro usb
         Mbed OS 6.x allows for micro usb (kinda, you have to use USBDevice.lib and delete all except USBDevice and USBSerial),
          but not BLE (see in mbed-os/features, the FEATURE_BLE folder has to be there)
         Change OS version via Mbed Libraries tab in the console on keil studio cloud
+        Maybe I'm just stupid and couldn't make it work but I tried
     forums : https://forums.mbed.com/t/max32630fthr-and-ble/9748/10
     more forums : https://forums.mbed.com/t/max32630fthr-ble-error/16235/13
     more forums : https://os.mbed.com/questions/78005/Using-MAX32630FTHR-PAN1326B-bluetooth-mo/
-    A library that offers support, but not related to Mbed OS ? https://github.com/bluekitchen/btstack
+    A library that offers fthr support, but not related to Mbed OS ? No idea how to use it https://github.com/bluekitchen/btstack
 
 
 Micro-usb :
@@ -41,10 +47,10 @@ Micro-usb :
 Note for others : 
     Buy another MCU board if you can, the MAX32630FTHR sucks
      because Maxim are not keeping anything up to date, all their codes are valid for Mbed OS ~5.9
-     and Mbed OS is gonna disappear in july 2026 anyway
+     and Mbed OS is gonna disappear in July 2026 anyway
      https://os.mbed.com/blog/entry/Important-Update-on-Mbed/
     Also, the MAX30101WING we received looked nothing like the pictures and we had to do a bit of hardware changes
-     (they put female connectors on the sensor side, so it was impossible to make a bracelet out of it
+     (they put female connectors on the sensor side, so it was impossible to make a wrist bracelet out of it,
      we had to remove them and put other ones on the back side, ie pointing away from the sensor)
     Its possible to program the FTHR with Arduino OS instead of Mbed OS, which might be easier for you but
     - no guarantee it works, you might run into trouble if Maxim forgot to update stuff again

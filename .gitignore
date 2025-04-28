@@ -9,3 +9,6 @@ compile_commands.json
 .clangd
 .cache
 USBDevice
+MAX30101
+max32630fthr/MAX14690
+max32630fthr
