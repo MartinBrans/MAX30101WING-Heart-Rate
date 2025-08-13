@@ -8,14 +8,18 @@ Heart rate algo source code for MAX30101WING :
     https://os.mbed.com/teams/Maxim-Integrated/code/MAX30101WING_HR_SPO2/
     https://os.mbed.com/teams/MaximIntegrated/code/max32630fthr/
     https://os.mbed.com/teams/MaximIntegrated/code/MAX30101/
-    MAX30101.lib and max32630fthr.lib don't actually work on keil studio cloud bc... github reasons
-     its supposed to be able to automatically clone them but it doesn't
-     so instead you can download the zips, extract them and upload them to get it to work
-    The algorithm as uploaded on the site doesn't work, which is mind bending, it's like no one has ever tested it.
-     You have to prevent a segfault from happening when the data buffers are overflowing (see "Overflow!" debug print),
-     because they just keep writing even though they know they overflowed the buffers.
-     If you don't, then the program will always crash because the buffers don't empty until they are full.
+    MAX30101.lib and max32630fthr.lib don't actually work on keil studio cloud bc... github reasons.
+     It's supposed to be able to automatically clone them but it doesn't,
+     so instead, you can download the zips, extract them and upload them to get it to work.
+    The software as uploaded on the site doesn't work, which is mind-bending, it's like no one at Maxim has ever tested it.
+     I had to prevent a segfault from happening when the data buffers are overflowing (see "Overflow!" debug print),
+     because they just keep writing even though they know they overflowed the buffers... 
+     If I didn't, then the buffers would not empty themselves until they would be completely full,
+     except if there are still samples to save before it launches the algorithm and empties the buffers, it segfaults.
      ... Again I don't understand how this garbage was uploaded as an example code for the MAX30101
+    When testing the HRSpO2 "algorithm" itself, it is revealed that it doesn't know what it's doing most of the time.
+     In fact, it tended to perform as well as an algorithm that picked it's answer at random. See the paper for more details.
+    Granted, it might be my fault because I might have not used it correctly when feeding it data to analyse.
 
 
 BLE usage source code : 
@@ -63,6 +67,5 @@ TODO :
 - test with a second green pulse (slot 4)
 - increase ADC gain and reduce red & ir current
 - test other algos
-- maybe try to remove red & ir altogether (requires to rework the algo)
+- remove the red & ir pulses if green is the only one used
 - LED4_PA (green LED current boost up to 80mA) -> register 0x0F
-- stream data via BLE (kinda done)

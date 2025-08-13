@@ -1,0 +1,99 @@
+#include <events/mbed_events.h>
+#include <mbed.h>
+#include "src/algo_HR.h"
+#include "src/hardware_config.h"
+#include "USBDevice/USBSerial/USBSerial.h"
+#include "algo_HR.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+// Setup board, select 3.3V logic
+MAX32630FTHR pegasus(MAX32630FTHR::VIO_3V3);
+
+// Setup I2C bus
+I2C i2cBusSensor(I2C1_SDA, I2C1_SCL);         // I2C bus, P3_4 = SDA, P3_5 = SCL
+
+// Setup sensor
+MAX30101 op_sensor(i2cBusSensor);
+
+DigitalOut rLED(LED1, 0); // Debug led (red)
+// DigitalOut gLED(LED2, 0); // Debug led (green)
+DigitalOut bLED(LED3, 0); // Debug led (blue)
+
+USBSerial pc1(0x1f00,0x2012,0x0001, false); // Direct connection to PC via USB, not MAXDAP 
+
+static EventQueue eventQueue(/* event count */ 16 * EVENTS_EVENT_SIZE);
+
+uint8_t fifoData[MAX30101::MAX_FIFO_BYTES];
+uint16_t idx, readBytes;
+uint32_t redData, irData, greenData;
+
+// Serial pc(USBTX, USBRX);
+
+void sensorPoll()
+{
+    int rc = op_sensor.readFIFO(MAX30101::ThreeLedChannels, fifoData, readBytes);
+
+    if(rc == 0) {
+        // pc1.printf("%i ", readBytes);
+        // Convert read bytes into samples
+        for (idx = 0; idx < readBytes; idx+=9) {
+            // redData = ((fifoData[idx] << 16) | (fifoData[idx + 1] << 8) | (fifoData[idx + 2])) & 0x03FFFF;
+
+            // irData = ((fifoData[idx + 3] << 16) | (fifoData[idx + 4] << 8) | (fifoData[idx + 5])) & 0x03FFFF;
+
+            greenData = ((fifoData[idx + 6] << 16) | (fifoData[idx + 7] << 8) | (fifoData[idx + 8])) & 0x03FFFF;
+
+            pc1.printf("%i,%i\r\n",bp_fir_filter(greenData),greenData);
+        }
+    } else {
+        // pc1.printf("Sensor read error\r\n");
+        rLED.write(1);
+    }
+}
+
+void sensorPollCallback(void) {
+    eventQueue.call(sensorPoll);
+}
+
+
+int main()
+{
+    Thread::wait(1.0); // Initial delay to give USBSerial time to detect (otherwise first messages get lost)
+
+    // Serial pc(USBTX, USBRX);            // Use USB debug probe for serial link (DAPLINK, through MAXDAP)
+    // pc.baud(115200);                    // Baud rate = 115200
+
+    // Setup PMIC on sensor board (for VLED supply)
+    DigitalOut VLED_EN(P3_3,0);                //Enable for VLEDs
+    pmic_config(i2cBusSensor, VLED_EN);
+
+    rLED.write(0);
+    
+    int rc = op_sensor_config(op_sensor);   // Config sensor, return 0 on success
+    if (rc) {
+        while(1) {
+            rLED = !rLED;
+            // pc1.printf("Something went wrong when configuring the sensor\r\n");
+            Thread::wait(2.0);
+        }
+    }
+
+    // // Monitor battery (from battery level example code, not used here anymore)
+    // // Setup I2C bus
+    // I2C i2cBusBattery(P5_7, P6_0);     //Actually i2c2
+    // // Setup PMIC on FTHR board
+    // MAX14690 pmic(&i2cBusBattery);
+    // pegasus.max14690.monSet(pegasus.max14690.MON_BAT, pegasus.max14690.MON_DIV4);
+    // pmic.monCfg = MAX14690::MON_BAT;
+
+    // pc.printf("Starting Program...Please wait a few seconds while data is being collected.\r\n");
+    // pc1.printf("Starting Program...Please wait a few seconds while data is being collected.\r\n");
+
+    eventQueue.call_every(180, sensorPollCallback); // Poll the sensor every 0.18s to empty sensor FIFO queue
+
+    eventQueue.dispatch_forever();
+
+    return 0;
+}

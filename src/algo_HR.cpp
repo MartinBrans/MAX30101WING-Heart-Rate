@@ -1,507 +1,431 @@
+// Inspired from https://github.com/paulvangentcom/heartrate_analysis_Arduino/tree/master
+// Major change: adapted the ADC resolution from Arduino's 10 bits to MAX30101's 18 bits
+/*
+ * Arduino Heart Rate Analysis Toolbox - Peak Finder ARM
+ *      Copyright (C) 2018 Paul van Gent
+ *      
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License V3 as published by
+ * the Free Software Foundation. The program is free for any commercial and
+ * non-commercial usage and adaptation, granted you give the recipients 
+ * of your code the same open-source rights and license.
+ * 
+ * You can read the full license granted to you here:
+ * https://www.gnu.org/licenses/gpl-3.0.en.html
+ * 
+ * Please add the following citation to any work utilising one or more of the
+ * implementation from this project:
+ * 
+ * <Add JORS paper reference once published>
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ */
+
 #include "algo_HR.h"
-#include <stdlib.h>
+#include <cstdint>
 
-//helper functions for the heart rate and SpO2 function :
+// Uncomment definitions corresponding to ADC resolution
+ // 10 bits (Arduino)
+// #define ADC_MAX (1023)
+// #define CLIP_LIM (3)
 
-// Average DC estimation
-uint16_t avg_dc_est(int32_t *p, uint16_t x);
+// 18 bits (MAX30101)
+#define ADC_MAX (262143)
+#define CLIP_LIM (1000)
 
-// Lowpass dual FIR filter
-void lp_dfir_flt(int16_t din0,int16_t din1,int16_t din2, int16_t *dout0,int16_t *dout1,int16_t *dout2) ;
+// -------------------- User Settable Variables --------------------
+const int16_t sample_rate = 100;
+double max_bpm = 200; //The max BPM to be expected, used in error detection (default 180)
+double min_bpm = 40; //The min BPM to be expected, used in error detection (default 45)
 
-// Multiply two 16-bit numbers -> 32-bit number
-int32_t mul16(int16_t x, int16_t y);
+// -------------------- Non-Settable Variables --------------------
+// Seriously, don't touch
+int32_t largestVal = 0;
+int16_t largestValPos = 0;
+int clippingcount = 0;
+int8_t clipFlag = 0;
+int clipStart = 0;
+int8_t clipEnd = 0;
+int32_t lastVal = 0;
+int16_t max_RR = (60.0 / min_bpm) * 1000.0;
+int16_t min_RR = (60.0 / max_bpm) * 1000.0;
+const int16_t ROIRange = sample_rate * 0.75;
+int16_t RR_multiplier = 1000 / sample_rate;
+int8_t firstCall = 1;
 
-void HRSpO2Func(uint32_t dinIR, uint32_t dinRed, uint32_t dinGreen, uint32_t ns,uint16_t SampRate,uint16_t compSpO2,
-                int16_t *ir_ac_comp,int16_t *red_ac_comp, int16_t *green_ac_comp, int16_t *ir_ac_mag,int16_t *red_ac_mag, 
-                int16_t *green_ac_mag,    uint16_t *HRbpm2,uint16_t *SpO2B,uint16_t *DRdy  )
+int32_t cbuf[32];
+
+// -------------------- Define Data Structs --------------------
+struct workingDataContainer
 {
-    static int32_t ir_avg_reg=0;
-    static int32_t red_avg_reg=0;
-    static int32_t green_avg_reg=0;
+    long absoluteCount;// = 0;
+    
+    //buffers
+    int32_t curVal;// = 0;
+    int16_t datalen;// = sample_rate
+    int32_t hrData[sample_rate];// = {0};
+    int16_t buffPos;// = 0;
+    
+    //movavg variables
+    int16_t windowSize;// = sample_rate * 0.6; //windowSize in samples
+    int32_t hrMovAvg[sample_rate];// = {0};
+    int16_t oldestValuePos;// = 1;
+    long movAvgSum;// = 0;
+    int32_t rangeLow;// = 0;
+    int32_t rangeLowNext;// = ADC_MAX+1;
+    int32_t rangeHigh;// = ADC_MAX;
+    int32_t rangeHighNext;// = 1;
+    int16_t rangeCounter;// = 0;
+    int16_t rangeRange;// = 2 * sample_rate;
 
-    static int16_t ir_ac_sig_cur=0;
-    // static int16_t ir_ac_sig_pre;
-    static int16_t ir_ac_sig_min=0;
-    static int16_t ir_ac_sig_max=0;
-    static int16_t ir_avg_est;
+    //peak variables
+    int32_t ROI[ROIRange];// = {0};
+    //int16_t ROI_interp[40] = {0};
+    int16_t ROIPos;// = 0;
+    int16_t peakFlag;// = 0;
+    int8_t ROI_overflow;// = 0;
+    long curPeak;// = 0;
+    long curPeakEnd;// = 0;
+    long lastPeak;// = 0;
 
-    static int16_t ir_pedge=0, ir_nedge=0;
-    static int16_t ir_pzxic, ir_pzxip;
-    static int16_t ir_nzxic;
+    //peak validation variables
+    int8_t initFlag;// = 0; //use for initialisation
+    int16_t lastRR;// = 0;
+    int16_t curRR;// = 0;
+    int16_t recent_RR[20];// = {0};
+    int16_t RR_mean;// = 0;
+    int16_t RR_sum;// = 0;
+    int16_t RR_pos;// = 0;
+    int16_t lower_threshold;// = 0;
+    int16_t upper_threshold;// = 1;
+};
 
-    static int16_t red_ac_sig_cur=0;
-    static int16_t red_ac_sig_min=0;
-    static int16_t red_ac_sig_max=0;
-    static int16_t red_avg_est;
+static const int32_t b[3] = {19718,0,-19718};
+static const int32_t a[3] = {262144,-482455,222707};
+static int32_t x1=0,x2=0;
+static int32_t y1=0,y2=0;
+static int32_t z1=0,z2=0;
 
-    static int16_t green_avg_est;
-    static int16_t green_ac_sig_cur=0;
-    //static int16_t green_ac_sig_cur=0;
-    static int16_t green_ac_sig_pre;
-    static int16_t green_ac_sig_max ;
-    static int16_t  green_ac_sig_min;
-    static int16_t green_mac_FIFO[5];
-    int16_t meanGreenMagFIFO;
-    int16_t minAmpForHeartBeat ;
+int64_t mul32(int32_t a, int32_t b){
+    return ((int64_t)a)*((int64_t) b);
+}
 
-    uint32_t  IRData,RedData, greenData , rnum,rden,rdens;
-    uint16_t  zeros_in_HrQue =0 ,   posCount=0;
-    static uint32_t prevPeakLoc = 0  ;
-    static int16_t IrFIFO[100];
-    static int16_t HrQue[10], lastKnownGoodHr[10];
-    static int16_t SPO2Que[5];
-    int16_t SPO2score[5];
-    static uint16_t HrQindex=0 ,lengthOfposCountExceeding =0 ;
-    static uint16_t initHrQueCounter=0 , fingerOff =0;
-
-    static int16_t HrQueSmoothing[3];
-    static int16_t SPO2QueSmoothing[3];
-
-    int16_t  k, j;
-    uint32_t peakLoc ;
-    int16_t bufferIdx1,  bufferIdx2;
-    int16_t maxFIFO ,IdxMaxFIFO ;
-    int16_t HRperiod2, HRComp2 ,deltaHR;
-    int16_t cSpO2, SpO2;
-
-    int16_t HrCount =0, HrSum =0 ,meanGreenMagFIFOcounter =0;
-    int16_t SPO2D ,meanHrQ;
-    int16_t dx[99] ,cumsumX[99];
-    static int16_t SPO2QueCounter =0 ;//, lastDisplayedHrValue;
-
-    int16_t validSPO2Count =0;
-    int16_t validSPO2Sum =0;
-    int16_t SPO2scoreAverage=  0;
-    int16_t SPO2scoreSum =0 ;
-//  int16_t  deltaMeanLastKnownGoodHr=0,meanLastKnownGoodHr =0 ;
-//  int16_t     counterMeanLastKnownGoodHr =0 ;
-
-
-//  clear some vars if fresh new start
-    if ((ns ==0) || (fingerOff  >300)) {
-        ir_avg_reg=0;
-        red_avg_reg=0;
-        green_avg_reg=0;
-
-        ir_ac_sig_cur=0;
-        // ir_ac_sig_pre=0;
-        ir_ac_sig_min=0;
-        ir_ac_sig_max=0;
-
-        ir_avg_est=0;
-        green_avg_est =0;
-        red_avg_est =0 ;
-
-        ir_pedge=0;
-        ir_nedge=0;
-        ir_pzxic=0;
-        ir_pzxip =0;
-        ir_nzxic=0 ;
-        //ir_nzxip =0;
-        red_ac_sig_cur=0;
-        red_ac_sig_min=0;
-        red_ac_sig_max=0;
-
-        prevPeakLoc = 0 ;
-        bufferIdx1=0 ;
-        bufferIdx2=0;
-        HrQindex =0;
-        initHrQueCounter=0;
-        lengthOfposCountExceeding =0 ;
-        fingerOff =0;
-        HRComp2 =0;
-
-        for (k=0 ; k<100 ; k++) {
-            IrFIFO[k]= 0;
-        }
-        for (k=0 ; k<10 ; k++) {
-            HrQue[k]= 0;
-            lastKnownGoodHr[k]=0;
-        }
-        for (k=0 ; k<3 ; k++) {
-            HrQueSmoothing[k]= 70;
-            SPO2QueSmoothing[k]=97;
-        }
-        for (k=0 ; k<5 ; k++) {
-            SPO2Que[k] =97;
-            SPO2score[k] =0;
-            green_mac_FIFO[k] =0;
-        }
-        SPO2QueCounter =0;
-        *SpO2B =97;
-        *HRbpm2 = 0;
-        *DRdy =0 ;
-
-    }
+//  Bandpass 2nd order FIR Filter
+int32_t bp_fir_filter(int32_t din)
+{
+    int64_t y = mul32(b[1],x1) - mul32(a[1],y1) + mul32(b[0],din)
+              + mul32(b[2],x2) - mul32(a[2],y2);
+    int32_t dinter = (int32_t) (y >> 18); // Equivalent to dividing by a[0] (= 2^18)
+    // Apply a second time to double the order
+    y = mul32(b[1],y1) - mul32(a[1],z1) + mul32(b[0],dinter)
+      + mul32(b[2],y2) - mul32(a[2],z2);
+    int32_t dout = (int32_t) (y >> 18); // Equivalent to dividing by a[0] (= 2^18)
+    x2 = x1; y2 = y1; z2 = z1;
+    x1 = din; y1 = dinter; z1 = dout;
+    return dout; 
+}
 
 
-//  Save current state
-    green_ac_sig_pre = green_ac_sig_cur;
-//
-//  Process next data sample
-    minAmpForHeartBeat =0;
-    IRData  = dinIR;
-    RedData = dinRed;
-    greenData = dinGreen ;
+struct workingDataContainer workingData;
 
-    ir_avg_est  = avg_dc_est(&ir_avg_reg,IRData);
-    red_avg_est = avg_dc_est(&red_avg_reg,RedData);
-    green_avg_est = avg_dc_est(&green_avg_reg,greenData);
-
-    lp_dfir_flt((uint16_t)(IRData - ir_avg_est),(uint16_t)(RedData - red_avg_est), 
-                (uint16_t)(greenData - green_avg_est),  &ir_ac_sig_cur,&red_ac_sig_cur,&green_ac_sig_cur);
-
-
-    *ir_ac_comp   = ir_ac_sig_cur;
-    *red_ac_comp  = red_ac_sig_cur;
-    *green_ac_comp  = green_ac_sig_cur;
-
-    //save to FIFO
-    for (k=1 ; k<100 ; k++) {
-        IrFIFO[100 -k]= IrFIFO[99-k];
-    }
-    IrFIFO[0] =  green_ac_sig_cur ; // invert
-    for (k=0 ; k<97 ; k++)
-        dx[k]= IrFIFO[k+2]-IrFIFO[k] ;
-    dx[97]= dx[96];
-    dx[98]=dx[96];
-
-    for (k=0 ; k<99 ; k++) {
-        if (dx[k] > 0 )
-            dx[k]=1;
-        else
-            dx[k] = 0;
-    }
-
-    cumsumX[0] =0;
-    for (k=1; k<99 ; k++) {
-        if (dx[k]>0 )
-            cumsumX[k]=  cumsumX[k-1] + dx[k] ;
-        else
-            cumsumX[k]=  0;
-    }
-// determine noise
-    // ignore less than 3 conseuctive non-zeros's
-    // detect # of sign change
-    posCount=0;
-    for (k=1; k<99 ; k++) {
-        if (cumsumX[k]>0 ) {
-            posCount ++ ;
-        } else if (cumsumX[k]==0 ) {
-            if (posCount<4  && k>=4) {
-                for ( j= k-1; j> k-posCount-1; j--)
-                    cumsumX[j]=0 ;
-            }
-            posCount =0;
-        }
-    }
-    // ignore less than 3 conseuctive zeros's
-
-    posCount=0;
-    for (k=1; k<99 ; k++) {
-        if (cumsumX[k]==0 ) {
-            posCount ++ ;
-        } else if (cumsumX[k] > 0 ) {
-            if (posCount<4  && k>=4) {
-                for ( j= k-1; j> k-posCount-1; j--)
-                    cumsumX[j]=100 ;
-            }
-            posCount =0;
-        }
-    }
-
-//// detect # of sign change
-    posCount=0; // sign change counter
-    for (k=0; k<98 ; k++) {
-        if (cumsumX[k]==0  && cumsumX[k+1] > 0 ) {
-            posCount ++;
-        }
-    }
-    if (posCount>=4) {
-        lengthOfposCountExceeding ++ ;
-        // printf("PosCount =%i \n", posCount );
-    } else
-        lengthOfposCountExceeding = 0 ;
-//  Detect IR channel positive zero crossing (rising edge)
-    if ((green_ac_sig_pre < 0) && (green_ac_sig_cur >= 0) && fingerOff==0 ) {
-
-        *ir_ac_mag   = ir_ac_sig_max   - ir_ac_sig_min;
-        *red_ac_mag  = red_ac_sig_max  - red_ac_sig_min;
-        *green_ac_mag  = green_ac_sig_max  - green_ac_sig_min;
-        if ( *green_ac_mag>0 ) {
-            for (k=0; k<4 ; k++)
-                green_mac_FIFO[k]=green_mac_FIFO[k+1];
-            green_mac_FIFO[4] = *green_ac_mag ;
-            if (  green_mac_FIFO[4] > 1000)
-                green_mac_FIFO[4] =1000;
-        }
-        meanGreenMagFIFO=0;
-        meanGreenMagFIFOcounter=0;
-        for (k=0; k<5 ; k++) {
-            if( green_mac_FIFO[k] >0) {
-                meanGreenMagFIFO= meanGreenMagFIFO +green_mac_FIFO[k] ;
-                meanGreenMagFIFOcounter++;
-            }
-        }
-        if (meanGreenMagFIFOcounter>=2 ) {
-            meanGreenMagFIFO =meanGreenMagFIFO/ meanGreenMagFIFOcounter ;
-            minAmpForHeartBeat= meanGreenMagFIFO /4 ;  //25% of mean of past heart beat
-        } else
-            minAmpForHeartBeat = 75;
-        if (minAmpForHeartBeat <75)
-            minAmpForHeartBeat =75;
-        if (minAmpForHeartBeat >400)
-            minAmpForHeartBeat =400;
-
-        ir_pedge = 1;
-        ir_nedge = 0;
-        ir_ac_sig_max = 0;
-        ir_pzxip = ir_pzxic;
-        ir_pzxic = ns;
-        bufferIdx1= ir_pzxic- ir_nzxic;
-        bufferIdx2 = ir_pzxic -ir_pzxip;
-
-
-        if ((*green_ac_mag)> minAmpForHeartBeat && (*green_ac_mag)< 20000  && bufferIdx1>=0 
-            && bufferIdx1 <100  && bufferIdx2>=0 && bufferIdx2 <100 && bufferIdx1< bufferIdx2 ) { // was <5000
-            maxFIFO = -32766;
-
-            IdxMaxFIFO = 0;
-            for ( j=bufferIdx1; j<= bufferIdx2; j++) { // find max peak
-                if (IrFIFO[j] > maxFIFO ) {
-                    maxFIFO =IrFIFO[j];
-                    IdxMaxFIFO  =j;
-                }
-            }
-            peakLoc= ir_pzxic -IdxMaxFIFO+1 ;
-
-            if (prevPeakLoc !=0) {
-                HRperiod2 =( uint16_t) (peakLoc -  prevPeakLoc);
-                if (HRperiod2>33 && HRperiod2 < 134) {
-                    HRComp2= (6000/HRperiod2);
-                    fingerOff =0 ;
-                } else
-                    HRComp2=0 ;
-            } else
-                HRComp2 = 0 ;
-
-            if ( initHrQueCounter<10  && HRComp2 >0 ) {
-                HrQue[HrQindex] =HRComp2;
-                HrQindex++;
-                initHrQueCounter ++;
-                if (HrQindex== 10)
-                    HrQindex  =0;
-            }
-
-            if (initHrQueCounter > 7  && lengthOfposCountExceeding<=3) {
-                if ( HRComp2 > 0) {
-
-                    HrCount =0;
-                    HrSum =0;
-                    zeros_in_HrQue=0;
-                    for (k=1 ; k<initHrQueCounter ; k++) {
-                        if (HrQue[k] >0) {
-                            HrSum +=HrQue[k];
-                            HrCount ++;
-                        } else
-                            zeros_in_HrQue ++;
-                    }
-                    meanHrQ = HrSum/HrCount ;
-                    deltaHR= lastKnownGoodHr[0]/10;
-
-                    if ( HRComp2 >  lastKnownGoodHr[0] -deltaHR &&  HRComp2  <lastKnownGoodHr[0] +deltaHR    ) {
-                        for (k=1 ; k<10 ; k++) {
-                            HrQue[10 -k]= HrQue[9-k];
-                        }
-                        HrQue[0] =HRComp2;
-                    }              // HR smmothing using FIFO queue -
-
-                    if (zeros_in_HrQue<=2) {
-                        for (k=1 ; k<3 ; k++) {
-                            HrQueSmoothing[3 -k]= HrQueSmoothing[2-k];
-                        }
-                        HrQueSmoothing[0] = meanHrQ ;
-                        HRComp2 =  ( (HrQueSmoothing[0]<<2) + (HrQueSmoothing[1]<<1) + (HrQueSmoothing[2] <<1) ) >>3;
-                        *HRbpm2 =HRComp2 ;
-
-                        for (k=1 ; k<10 ; k++) {
-                            lastKnownGoodHr[10 -k]= lastKnownGoodHr[9-k];
-                        }
-                        lastKnownGoodHr[0] =HRComp2;
-                    }
-                }
-
-            }
-            ///// if (initHrQueCounter > 7  && lengthOfposCountExceeding<5)
-            else if (initHrQueCounter < 7) { // before que is filled up, display whatever it got.
-                *HRbpm2 =  HRComp2;
-
-            } else {
-                //  *HRbpm2 =  0 ;
-                HrCount =0;
-                HrSum =0;
-                for (k=0 ; k<10 ; k++) {
-                    if (lastKnownGoodHr[k] >0) {
-                        HrSum =HrSum + lastKnownGoodHr[k];
-                        HrCount++;
-                    }
-                }
-                if (HrCount>0)
-                    *HRbpm2 =   HrSum/HrCount;
-                else
-                    *HRbpm2 = 0;
-
-
-
-            }
-            prevPeakLoc = peakLoc ; // save peakLoc into Static var
-
-
-            if (compSpO2) {
-                rnum = (ir_avg_reg >> 20)*(*red_ac_mag);
-                rden = (red_avg_reg >> 20)*(*ir_ac_mag);
-                rdens = (rden>>15);
-                if (rdens>0) cSpO2 = 110- (((25*rnum)/(rdens))>>15);
-
-                if (cSpO2 >=100) SpO2 = 100;
-                else if (cSpO2 <= 70) SpO2 = 70;
-                else SpO2 = cSpO2;
-
-                SPO2Que[SPO2QueCounter ] = SpO2;
-
-                for (k=0 ; k<5 ; k++) {
-                    SPO2score[k]  =0;
-                    for (j=0 ; j< 5 ; j++)
-                        if( abs( SPO2Que[k] - SPO2Que[j] )>5)
-                            SPO2score[k] ++;
-                }
-
-
-                SPO2scoreSum=  0;
-                for (k=0 ; k<5 ; k++)
-                    SPO2scoreSum += SPO2score[k] ;
-                SPO2scoreAverage= SPO2scoreSum / 5;
-                for (k=1 ; k<5 ; k++)
-                    SPO2score[k] = SPO2score[k] -SPO2scoreAverage;
-
-                validSPO2Count =0;
-                validSPO2Sum =0;
-                for (k=1 ; k<5 ; k++) {
-                    if (SPO2score[k]<=0 ) { // add for HR to report
-                        validSPO2Sum +=SPO2Que[k];
-                        validSPO2Count ++;
-                    }
-                }
-                if ( validSPO2Count>0)
-                    SPO2D = (validSPO2Sum /validSPO2Count)-1;
-                if ( SPO2D >100)
-                    SPO2D = 100;
-
-                SPO2QueCounter ++;
-                if (SPO2QueCounter ==5) SPO2QueCounter = 0;
-
-                for (k=1 ; k<3 ; k++) {
-                    SPO2QueSmoothing[3 -k]= SPO2QueSmoothing[2-k];
-                }
-                SPO2QueSmoothing[0] = SPO2D;
-                *SpO2B =  ( (SPO2QueSmoothing[0]<<2) + (SPO2QueSmoothing[1]<<1) + (SPO2QueSmoothing[2] <<1) ) >>3;
-
-                if (*SpO2B> 100) *SpO2B = 100 ;
-
-            } else {
-                SpO2 = 0;
-                *SpO2B = 0;
-            }
-            *DRdy = 1;
-
-        }
-    }
-//  Detect IR channel negative zero crossing (falling edge)
-    if ((green_ac_sig_pre > 0) && (green_ac_sig_cur <= 0)) {
-        ir_pedge = 0;
-        ir_nedge = 1;
-        ir_ac_sig_min = 0;
-        ir_nzxic = ns;
-    }
-//  Find Maximum IR & Red values in positive cycle
-    if (ir_pedge && (green_ac_sig_cur > green_ac_sig_pre)) {
-        ir_ac_sig_max  = ir_ac_sig_cur;
-        red_ac_sig_max = red_ac_sig_cur;
-        green_ac_sig_max = green_ac_sig_cur;
-    }
-
-//  Find minimum IR & Red values in negative cycle
-    if (ir_nedge && (green_ac_sig_cur < green_ac_sig_pre)) {
-        ir_ac_sig_min  = ir_ac_sig_cur;
-        red_ac_sig_min = red_ac_sig_cur;
-        green_ac_sig_min = green_ac_sig_cur;
-    }
-    if (IRData <50000  )
-        // finger-off
+// -------------------- Define Helper Functions --------------------
+int findMax(int32_t arr[], int16_t arrLen, struct workingDataContainer &workingData)
+{
+    largestVal = 0;
+    largestValPos = 0;
+    clippingcount = 0;
+    clipFlag = 0;
+    clipStart = 0;
+    clipEnd = 0;
+    lastVal = 0;
+    
+    for(int i = 0; i<arrLen; i++)
     {
-        fingerOff++;
-        *DRdy = 0;
-    } else
-        fingerOff = 0 ;
-    /*if  (IRData <50000  &&  fingerOff>10 )
-       fingerOff = 0; */
-    if  ( *SpO2B ==  0  ||   *HRbpm2 ==0)
-        *DRdy = 0;
+        if((abs((double)(lastVal - arr[i])) <= CLIP_LIM) && (arr[i] > ADC_MAX-CLIP_LIM))
+        {
+            if(clipFlag == 0)
+            {
+                clipFlag = 1;
+                clipStart = i;
+            } else {
+                clippingcount++;
+            }
+        } else {
+            if(clipFlag == 1)
+            {
+                clipEnd = i;
+            }
+        }
+        
+        lastVal = arr[i];        
+        
+        if(arr[i] > largestVal) 
+        {
+            largestVal = arr[i];
+            largestValPos = i;
+        }
 
-    /*if (ns > 2000 )
-    {
-        if (abs(lastDisplayedHrValue - *HRbpm2)>5)
-            *HRbpm2 =lastDisplayedHrValue ;
-        else
-            lastDisplayedHrValue = *HRbpm2;
-    }*/
-    // *DRdy = minAmpForHeartBeat;
-
-}
-
-//  Average DC Estimator
-uint16_t avg_dc_est(int32_t *p, uint16_t x)
-{
-    *p += ((((int32_t) x << 15) - *p)>>4);
-    return (*p >> 15);
-}
-
-//  Symmetric Dual Low Pass FIR Filter
-void lp_dfir_flt(int16_t din0,int16_t din1,int16_t din2, int16_t *dout0,int16_t *dout1,int16_t *dout2)
-{
-    static const uint16_t FIRCoeffs[12] = {688,1283,2316,3709,5439,7431,
-                                           9561,11666,13563,15074,16047,16384
-                                          };
-
-    static int16_t cbuf0[32],cbuf1[32] , cbuf2[32];
-    static int16_t offset = 0;
-    int32_t y0,y1, y2;
-    int16_t i;
-
-    cbuf0[offset] = din0;
-    cbuf1[offset] = din1;
-    cbuf2[offset] = din2;
-
-    y0 = mul16(FIRCoeffs[11], cbuf0[(offset - 11)&0x1F]);
-    y1 = mul16(FIRCoeffs[11], cbuf1[(offset - 11)&0x1F]);
-    y2 = mul16(FIRCoeffs[11], cbuf2[(offset - 11)&0x1F]);
-
-
-    for (i=0; i<11; i++) {
-        y0 += mul16(FIRCoeffs[i], cbuf0[(offset-i)&0x1F] + cbuf0[(offset-22+i)&0x1F]);
-        y1 += mul16(FIRCoeffs[i], cbuf1[(offset-i)&0x1F] + cbuf1[(offset-22+i)&0x1F]);
-        y2 += mul16(FIRCoeffs[i], cbuf2[(offset-i)&0x1F] + cbuf2[(offset-22+i)&0x1F]);
+        /*if(clippingcount > 3) 
+        //preliminary clipping correction
+        //disabled: doesn't work properly
+        {
+            largestValPos = (clipStart + (clipEnd - clipStart)) / 2;
+        }*/
     }
-    offset = (offset + 1)&0x1F;
-
-    *dout0 = (y0>>15);
-    *dout1 =  (y1>>15);
-    *dout2 =  (y2>>15);
+        
+    return workingData.curPeakEnd - (arrLen - largestValPos);
 }
 
-//  Integer multiplier
-int32_t mul16(int16_t x, int16_t y)
+void getMeanRR(struct workingDataContainer &workingData)
+{ //returns the mean of the RR_list array.
+    workingData.RR_sum = 0;
+    for(int i = 0; i<20; i++)
+    {
+        workingData.RR_sum += workingData.recent_RR[i];
+    }
+    workingData.RR_mean = workingData.RR_sum / 20;
+}
+
+long mapl(long x, long in_min, long in_max)
 {
-    return (int32_t)(x* y);
+    return (x - in_min) * ADC_MAX / (in_max - in_min) + 1;
+}
+
+void establish_range(struct workingDataContainer &workingData)
+{
+    if(workingData.rangeCounter <= workingData.rangeRange)
+    {
+        //update upcoming ranges
+        if(workingData.rangeLowNext > workingData.curVal) workingData.rangeLowNext = workingData.curVal;
+        if(workingData.rangeHighNext < workingData.curVal) workingData.rangeHighNext = workingData.curVal;
+        workingData.rangeCounter++;
+    } else {
+        //set range, minimum range should be bigger than 50
+        //otherwise set to default of (0, 1024)
+        if((workingData.rangeHighNext - workingData.rangeLowNext) > 50)
+        {
+            //update range
+            workingData.rangeLow = workingData.rangeLowNext;
+            workingData.rangeHigh = workingData.rangeHighNext;
+            workingData.rangeLowNext = ADC_MAX+1;
+            workingData.rangeHighNext = 1;
+        } else {
+            //reset range to default
+            workingData.rangeLow = 0;
+            workingData.rangeHigh = ADC_MAX+1;
+        }
+        workingData.rangeCounter = 0;
+    }
+}
+
+// -------------------- Define Main Functions --------------------
+void movingAvg(struct workingDataContainer &workingData)
+{
+
+    establish_range(workingData);
+    workingData.curVal = mapl(workingData.curVal, workingData.rangeLow, workingData.rangeHigh);
+    if(workingData.curVal < 0) workingData.curVal = 0;
+    //if(workingData.curVal > ADC_MAX) workingData.curVal = ADC_MAX;
+    
+    workingData.movAvgSum += workingData.curVal; //update total sum by adding recent value
+    workingData.movAvgSum -= workingData.hrData[workingData.oldestValuePos]; //as well as subtracting oldest value
+    workingData.hrMovAvg[workingData.buffPos] = workingData.movAvgSum / workingData.windowSize; //compute moving average
+    workingData.hrData[workingData.buffPos] = workingData.curVal; //store sensor value
+    int32_t val;
+}
+
+void updatePeak(struct workingDataContainer &workingData)
+{
+    //updates peak positions, adds RR-interval to recent intervals
+    workingData.recent_RR[workingData.RR_pos] = workingData.curRR;
+    workingData.RR_pos++;
+    
+    if(workingData.RR_pos >= 20)
+    {
+        workingData.RR_pos = 0;
+        workingData.initFlag = 1;
+    }
+
+//     if(!report_hr)
+//     {
+//         Serial.print(workingData.curRR);
+//         Serial.print(",");
+//         Serial.println(workingData.curPeak);
+//     } else {
+//         Serial.print(workingData.curRR);
+//         Serial.print(",");
+//         Serial.print(workingData.curPeak);
+//     }
+}
+
+void validatePeak(struct workingDataContainer &workingData)
+{
+    //validate peaks by thresholding, only update if within thresholded band
+    if(workingData.initFlag != 0)
+    {
+        getMeanRR(workingData);
+        // if((workingData.RR_mean* 0.3) <= 300){
+        //     workingData.lower_threshold = workingData.RR_mean - 300;
+        //     workingData.upper_threshold = workingData.RR_mean + 300;
+        // } else{
+        //     workingData.lower_threshold = workingData.RR_mean - (0.3 * workingData.RR_mean);
+        //     workingData.upper_threshold = workingData.RR_mean + (0.3 * workingData.RR_mean);
+        // }
+        
+        if(//workingData.curRR < workingData.upper_threshold &&
+        //workingData.curRR > workingData.lower_threshold &&
+        abs((double)(workingData.curRR - workingData.lastRR)) < 500)
+        {
+            updatePeak(workingData);
+        // }    else {
+        //     if(report_hr) Serial.print(",");
+        }
+    }
+}
+
+void checkForPeak(struct workingDataContainer &workingData)
+{
+    if(workingData.hrData[workingData.buffPos] >= workingData.hrMovAvg[workingData.buffPos])
+    {
+        if(workingData.ROIPos >= ROIRange){
+            workingData.ROI_overflow = 1;
+        //     if(report_hr) Serial.print(",");
+            return;
+        } else {
+            workingData.peakFlag = 1;
+            workingData.ROI[workingData.ROIPos] = workingData.curVal;
+            workingData.ROIPos++;
+            workingData.ROI_overflow = 0;
+        //     if(report_hr) Serial.print(",");
+            return;
+        }
+    }
+    
+    if((workingData.hrData[workingData.buffPos] <= workingData.hrMovAvg[workingData.buffPos])
+    && (workingData.peakFlag == 1))
+    {
+        if(workingData.ROI_overflow == 1)
+        {
+            workingData.ROI_overflow = 0;
+        } else {
+            //solve for peak
+            workingData.lastRR = workingData.curRR;
+            workingData.curPeakEnd = workingData.absoluteCount;
+            workingData.lastPeak = workingData.curPeak;
+            workingData.curPeak = findMax(workingData.ROI, workingData.ROIPos, workingData);
+            workingData.curRR = (workingData.curPeak - workingData.lastPeak) * RR_multiplier;
+            //Serial.println(workingData.curPeak);
+            //add peak to struct
+        }
+        workingData.peakFlag = 0;
+        workingData.ROIPos = 0;
+
+        //error detection run, timed at ????????????????????
+
+        if(workingData.curRR > max_RR || workingData.curRR < min_RR)
+        {
+        //     if(report_hr) Serial.print(",");
+            return; //break if outside of BPM bounds anyway
+        } else if(workingData.initFlag != 0)
+        {
+            validatePeak(workingData);
+        } else {
+            updatePeak(workingData);
+        }
+    } //else if (report_hr) Serial.print(",");
+}
+
+
+int16_t HRFunc(int32_t sample)
+{ 
+    // 
+
+    //report the absolute count
+//     if(report_hr)
+//     {
+//         Serial.print(workingData.absoluteCount);
+//         Serial.print(",");
+//     }
+
+    if (firstCall) {
+        firstCall = 0;
+        // Reset all
+
+        for (int i = 0; i < 32; i++){cbuf[i] = 0;}
+        
+        workingData.absoluteCount = 0;
+    
+        //buffers
+        workingData.curVal = 0;
+        workingData.datalen = sample_rate;
+        for (int i = 0; i < sample_rate; i++){workingData.hrData[i] = 0;}
+        workingData.buffPos = 0;
+        
+        //movavg variables
+        workingData.windowSize = sample_rate * 0.6; //windowSize in samples
+        for (int i = 0; i < sample_rate; i++){workingData.hrMovAvg[i] = 0;}
+        workingData.oldestValuePos = 1;
+        workingData.movAvgSum = 0;
+        workingData.rangeLow = 0;
+        workingData.rangeLowNext = ADC_MAX+1;
+        workingData.rangeHigh = ADC_MAX;
+        workingData.rangeHighNext = 1;
+        workingData.rangeCounter = 0;
+        workingData.rangeRange = 2 * sample_rate;
+
+        //peak variables
+        for (int i = 0; i < ROIRange; i++){workingData.ROI[i] = 0;}
+        //int16_t ROI_interp[40] = {0};
+        workingData.ROIPos = 0;
+        workingData.peakFlag = 0;
+        workingData.ROI_overflow = 0;
+        workingData.curPeak = 0;
+        workingData.curPeakEnd = 0;
+        workingData.lastPeak = 0;
+
+        //peak validation variables
+        workingData.initFlag = 1; //use for initialisation
+        workingData.lastRR = 0;
+        workingData.curRR = 0;
+        for (int i = 0; i < 20; i++) {workingData.recent_RR[i] = 0;} // Reset only once
+        workingData.RR_mean = 0;
+        workingData.RR_sum = 0;
+        workingData.RR_pos = 0;
+        workingData.lower_threshold = 0;
+        workingData.upper_threshold = 1;
+    }
+
+    // workingData.curVal = sample;
+    workingData.curVal = bp_fir_filter(sample);
+
+    //read the sensor value
+    movingAvg(workingData);
+
+    //check if peak is present, update variables if so
+    checkForPeak(workingData);
+    
+    //report raw signal if requested
+//     if(report_hr) 
+//     {
+//         Serial.print(",");
+//         Serial.print(workingData.hrMovAvg[workingData.buffPos]);
+//         Serial.print(",");
+//         Serial.println(workingData.curVal);
+//     }
+    //update buffer position pointers
+    workingData.buffPos++;
+    workingData.oldestValuePos++;
+
+    //reset buffer pointers if at end of buffer
+    if(workingData.buffPos >= sample_rate) workingData.buffPos = 0;
+    if(workingData.oldestValuePos >= sample_rate) workingData.oldestValuePos = 0;
+
+    //increment total sample counter (used for RR determination)
+    workingData.absoluteCount++;
+
+    return (uint16_t) (60000/workingData.RR_mean); // seconds per minute * milliseconds per second / milliseconds per beat
+
 }
